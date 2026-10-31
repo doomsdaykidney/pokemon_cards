@@ -17,6 +17,7 @@ let pendingAdditions = new Set();
 let pendingRemovals = new Set();
 let isSyncing = false;
 let syncTimeout = null;
+let lastSyncError = "";
 
 // DOM Elements
 const binderGrid = document.getElementById("binderGrid");
@@ -60,45 +61,77 @@ function getSpriteUrl(id) {
   return `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/${id}.png`;
 }
 
+// Clean up user-entered owner/repo/token strings from mobile keyboards
+function sanitizeConfig(raw) {
+  let owner = (raw.owner || "").trim();
+  let repo = (raw.repo || "").trim();
+  let branch = (raw.branch || "main").trim() || "main";
+  let token = (raw.token || "").trim();
+
+  // If user pasted a full github.com or github.io URL, extract owner/repo
+  owner = owner
+    .replace(/^https?:\/\//i, "")
+    .replace(/\.github\.io.*$/i, "")
+    .replace(/^github\.com\//i, "")
+    .split("/")[0]
+    .trim();
+
+  repo = repo
+    .replace(/^https?:\/\/github\.com\/[^/]+\//i, "")
+    .replace(/\.git$/i, "")
+    .split("/")[0]
+    .trim();
+
+  return { owner, repo, branch, token };
+}
+
 // Auto-detect GitHub owner/repo when hosted on github.io
 function getDefaultGitHubConfig() {
+  let detectedOwner = "";
+  let detectedRepo = "";
+  const host = window.location.hostname;
+  const pathParts = window.location.pathname.split("/").filter(Boolean);
+
+  if (host.endsWith(".github.io")) {
+    detectedOwner = host.replace(".github.io", "");
+    detectedRepo = pathParts[0] || "";
+  }
+
   const savedRaw = localStorage.getItem(STORAGE_KEYS.GH_CONFIG);
   if (savedRaw) {
     try {
-      return JSON.parse(savedRaw);
+      const parsed = sanitizeConfig(JSON.parse(savedRaw));
+      return {
+        owner: parsed.owner || detectedOwner,
+        repo: parsed.repo || detectedRepo,
+        branch: parsed.branch || "main",
+        token: parsed.token || "",
+      };
     } catch (e) {
       // Fallback below
     }
   }
 
-  let owner = "";
-  let repo = "";
-  const host = window.location.hostname;
-  const pathParts = window.location.pathname.split("/").filter(Boolean);
-
-  if (host.endsWith(".github.io")) {
-    owner = host.replace(".github.io", "");
-    repo = pathParts[0] || "";
-  }
-
   return {
-    owner,
-    repo,
+    owner: detectedOwner,
+    repo: detectedRepo,
     branch: "main",
     token: "",
   };
 }
 
 function saveGitHubConfig(config) {
-  localStorage.setItem(STORAGE_KEYS.GH_CONFIG, JSON.stringify(config));
+  localStorage.setItem(STORAGE_KEYS.GH_CONFIG, JSON.stringify(sanitizeConfig(config)));
 }
 
-function updateSyncIndicator(state, label) {
+function updateSyncIndicator(state, label, errorDetail = "") {
   syncDot.className = "sync-dot";
   if (state === "synced") syncDot.classList.add("synced");
   if (state === "saving") syncDot.classList.add("saving");
   if (state === "error") syncDot.classList.add("error");
   syncStatusText.textContent = label;
+  lastSyncError = errorDetail;
+  syncSettingsBtn.title = errorDetail || label;
 }
 
 // Load local cache first for instant rendering
@@ -143,7 +176,6 @@ async function fetchPokemonNames() {
     const data = await res.json();
     const map = {};
     data.results.forEach((item, index) => {
-      // Extract ID from URL or fallback to 1-based index
       const parts = item.url.split("/").filter(Boolean);
       const id = parseInt(parts[parts.length - 1], 10) || index + 1;
       map[id] = item.name.replace(/-/g, " ");
@@ -284,7 +316,7 @@ function toggleCard(dexId, cardEl) {
 
 // Decode Base64 UTF-8 content from GitHub API
 function decodeBase64Json(base64Str) {
-  const clean = base64Str.replace(/\n/g, "");
+  const clean = base64Str.replace(/\s/g, "");
   const text = decodeURIComponent(escape(atob(clean)));
   return JSON.parse(text);
 }
@@ -295,12 +327,22 @@ function encodeBase64Json(obj) {
   return btoa(unescape(encodeURIComponent(jsonStr)));
 }
 
+// Describe GitHub HTTP error clearly
+function formatGitHubError(status, message) {
+  if (status === 401) return "Invalid Token (401)";
+  if (status === 403) return "Token lacks Write permission (403)";
+  if (status === 404) return "Repo/Branch not found (404)";
+  if (status === 409) return "Conflict, tap Refresh (409)";
+  if (status === 422) return "Branch/SHA mismatch (422)";
+  return `GitHub Error (${status}${message ? ": " + message : ""})`;
+}
+
 // Fetch latest collection.json from GitHub API (or fallback to ./collection.json)
 async function fetchRemoteCollection() {
   const config = getDefaultGitHubConfig();
 
   if (config.owner && config.repo) {
-    const apiUrl = `https://api.github.com/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/contents/collection.json?ref=${encodeURIComponent(config.branch || "main")}&t=${Date.now()}`;
+    const apiUrl = `https://api.github.com/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/contents/collection.json?ref=${encodeURIComponent(config.branch || "main")}`;
     const headers = {
       Accept: "application/vnd.github.v3+json",
     };
@@ -315,7 +357,6 @@ async function fetchRemoteCollection() {
         const parsed = decodeBase64Json(fileData.content);
         if (Array.isArray(parsed.collected)) {
           collectedSet = new Set(parsed.collected);
-          // Re-apply any unsaved local toggles
           pendingAdditions.forEach((id) => collectedSet.add(id));
           pendingRemovals.forEach((id) => collectedSet.delete(id));
           saveLocalCollected();
@@ -326,17 +367,31 @@ async function fetchRemoteCollection() {
           );
           return;
         }
+      } else if (res.status === 404 && config.token) {
+        // collection.json might not exist in repo yet; first save will create it
+        updateSyncIndicator("synced", "Ready to Save");
+        return;
       } else {
-        updateSyncIndicator("error", `GitHub Error (${res.status})`);
+        let errMsg = "";
+        try {
+          const errJson = await res.json();
+          errMsg = errJson.message || "";
+        } catch (_) {}
+        updateSyncIndicator("error", formatGitHubError(res.status), errMsg);
+        return;
       }
     } catch (err) {
       console.warn("GitHub API fetch failed, trying static file fallback:", err);
+      if (config.token) {
+        updateSyncIndicator("error", "Network Error", String(err.message || err));
+        return;
+      }
     }
   }
 
   // Fallback: fetch local ./collection.json if local state is empty
   try {
-    const res = await fetch(`./collection.json?t=${Date.now()}`, { cache: "no-store" });
+    const res = await fetch(`./collection.json`, { cache: "no-store" });
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data.collected) && collectedSet.size === 0) {
@@ -366,19 +421,28 @@ function scheduleGitHubSave() {
   updateSyncIndicator("saving", "Saving...");
   if (syncTimeout) clearTimeout(syncTimeout);
   syncTimeout = setTimeout(() => {
+    syncTimeout = null;
     pushChangesToGitHub();
-  }, 650);
+  }, 500);
 }
 
 // Auto-merge local toggles onto latest remote collection.json and commit
 async function pushChangesToGitHub() {
-  if (isSyncing) return;
-  if (pendingAdditions.size === 0 && pendingRemovals.size === 0) return;
-
   const config = getDefaultGitHubConfig();
-  if (!config.owner || !config.repo || !config.token) return;
+  if (!config.owner || !config.repo || !config.token) {
+    updateSyncIndicator("idle", "Saved Locally (Setup Sync)");
+    return;
+  }
+
+  if (isSyncing) return;
+
+  if (pendingAdditions.size === 0 && pendingRemovals.size === 0) {
+    updateSyncIndicator("synced", "Synced");
+    return;
+  }
 
   isSyncing = true;
+  let hadError = false;
   updateSyncIndicator("saving", "Saving...");
 
   // Snapshot the changes we are about to commit
@@ -387,16 +451,15 @@ async function pushChangesToGitHub() {
 
   const baseUrl = `https://api.github.com/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/contents/collection.json`;
   const branch = config.branch || "main";
-  const headers = {
+  const authHeaders = {
     Accept: "application/vnd.github.v3+json",
     Authorization: `Bearer ${config.token}`,
-    "Content-Type": "application/json",
   };
 
   try {
     // 1. Fetch latest file and SHA from GitHub so 2 users never overwrite each other
-    const getRes = await fetch(`${baseUrl}?ref=${encodeURIComponent(branch)}&t=${Date.now()}`, {
-      headers,
+    const getRes = await fetch(`${baseUrl}?ref=${encodeURIComponent(branch)}`, {
+      headers: authHeaders,
       cache: "no-store",
     });
 
@@ -413,7 +476,12 @@ async function pushChangesToGitHub() {
       addSnapshot.forEach((id) => mergedSet.add(id));
       removeSnapshot.forEach((id) => mergedSet.delete(id));
     } else if (getRes.status !== 404) {
-      throw new Error(`GET failed with status ${getRes.status}`);
+      let errMsg = "";
+      try {
+        const errJson = await getRes.json();
+        errMsg = errJson.message || "";
+      } catch (_) {}
+      throw { status: getRes.status, message: errMsg };
     }
 
     const sortedList = Array.from(mergedSet).sort((a, b) => a - b);
@@ -429,12 +497,20 @@ async function pushChangesToGitHub() {
     // 2. Commit merged collection.json back to GitHub
     const putRes = await fetch(baseUrl, {
       method: "PUT",
-      headers,
+      headers: {
+        ...authHeaders,
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify(body),
     });
 
     if (!putRes.ok) {
-      throw new Error(`PUT failed with status ${putRes.status}`);
+      let errMsg = "";
+      try {
+        const errJson = await putRes.json();
+        errMsg = errJson.message || "";
+      } catch (_) {}
+      throw { status: putRes.status, message: errMsg };
     }
 
     // Clear committed items from pending sets
@@ -450,12 +526,16 @@ async function pushChangesToGitHub() {
 
     updateSyncIndicator("synced", "Synced");
   } catch (err) {
+    hadError = true;
     console.error("Failed to sync with GitHub:", err);
-    updateSyncIndicator("error", "Sync Error (Click to Check)");
+    const statusLabel = err && err.status
+      ? formatGitHubError(err.status)
+      : "Sync Error (Tap to Check)";
+    updateSyncIndicator("error", statusLabel, err && err.message ? err.message : String(err));
   } finally {
     isSyncing = false;
-    // If more clicks happened while saving, run another pass
-    if (pendingAdditions.size > 0 || pendingRemovals.size > 0) {
+    // Only auto-schedule another pass if the previous pass succeeded AND new clicks arrived
+    if (!hadError && (pendingAdditions.size > 0 || pendingRemovals.size > 0)) {
       scheduleGitHubSave();
     }
   }
@@ -596,9 +676,12 @@ document.addEventListener("click", (e) => {
 });
 
 // Refresh Button
-refreshBtn.addEventListener("click", () => {
+refreshBtn.addEventListener("click", async () => {
   updateSyncIndicator("saving", "Refreshing...");
-  fetchRemoteCollection();
+  await fetchRemoteCollection();
+  if (pendingAdditions.size > 0 || pendingRemovals.size > 0) {
+    pushChangesToGitHub();
+  }
 });
 
 // Sync Settings Modal
@@ -630,12 +713,12 @@ clearSyncBtn.addEventListener("click", () => {
 
 syncForm.addEventListener("submit", async (e) => {
   e.preventDefault();
-  const cfg = {
-    owner: ghOwnerInput.value.trim(),
-    repo: ghRepoInput.value.trim(),
-    branch: ghBranchInput.value.trim() || "main",
-    token: ghTokenInput.value.trim(),
-  };
+  const cfg = sanitizeConfig({
+    owner: ghOwnerInput.value,
+    repo: ghRepoInput.value,
+    branch: ghBranchInput.value,
+    token: ghTokenInput.value,
+  });
   saveGitHubConfig(cfg);
   syncModal.classList.add("hidden");
   updateSyncIndicator("saving", "Syncing...");
@@ -651,4 +734,3 @@ loadLocalState();
 renderBinderPage();
 fetchPokemonNames();
 fetchRemoteCollection();
-
