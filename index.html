@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0f172a" />
+  <title>Pokédex 4×4 Card Binder</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <h1 class="app-title">Pokédex Binder</h1>
+      <div class="progress-pill" id="progressPill" title="Total Pokémon collected">
+        <span id="collectedCount">0</span> / <span id="totalCount">1025</span>
+        (<span id="collectedPercent">0.0%</span>)
+      </div>
+    </div>
+
+    <div class="topbar-center">
+      <div class="search-wrapper">
+        <input
+          type="search"
+          id="searchInput"
+          placeholder="Jump to Pokémon or # (e.g. Pikachu, 25)..."
+          autocomplete="off"
+        />
+        <div id="searchResults" class="search-results hidden"></div>
+      </div>
+
+      <select id="genSelect" class="gen-select" aria-label="Jump to Generation">
+        <option value="">Jump to Gen...</option>
+        <option value="1">Gen I (#0001 - #0151)</option>
+        <option value="152">Gen II (#0152 - #0251)</option>
+        <option value="252">Gen III (#0252 - #0386)</option>
+        <option value="387">Gen IV (#0387 - #0493)</option>
+        <option value="494">Gen V (#0494 - #0649)</option>
+        <option value="650">Gen VI (#0650 - #0721)</option>
+        <option value="722">Gen VII (#0722 - #0809)</option>
+        <option value="810">Gen VIII (#0810 - #0905)</option>
+        <option value="906">Gen IX (#0906 - #1025)</option>
+      </select>
+    </div>
+
+    <div class="topbar-right">
+      <button id="refreshBtn" class="icon-btn" title="Refresh from GitHub">
+        ↻
+      </button>
+      <button id="syncSettingsBtn" class="sync-btn">
+        <span class="sync-dot" id="syncDot"></span>
+        <span id="syncStatusText">Sync Setup</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="binder-stage">
+    <section class="binder-page" id="binderGrid" aria-label="4 by 4 Card Grid">
+      <!-- 16 card slots rendered by app.js -->
+    </section>
+
+    <nav class="page-controls" aria-label="Page navigation">
+      <button id="prevPageBtn" class="nav-btn" aria-label="Previous page">
+        ← Prev
+      </button>
+
+      <div class="page-indicator">
+        <label for="pageSelect" class="sr-only">Select Page</label>
+        <select id="pageSelect" class="page-select"></select>
+        <span class="page-range" id="pageRangeLabel">#0001 – #0016</span>
+      </div>
+
+      <button id="nextPageBtn" class="nav-btn" aria-label="Next page">
+        Next →
+      </button>
+    </nav>
+  </main>
+
+  <!-- GitHub Sync Settings Modal -->
+  <div id="syncModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2 id="modalTitle">GitHub Sync Settings</h2>
+        <button id="closeModalBtn" class="close-btn" aria-label="Close">&times;</button>
+      </div>
+      <p class="modal-desc">
+        Share the same GitHub Personal Access Token across your devices so anyone with the token can view and edit this binder in real time.
+      </p>
+      <form id="syncForm">
+        <div class="form-group">
+          <label for="ghOwner">GitHub Username / Owner</label>
+          <input type="text" id="ghOwner" placeholder="e.g. octocat" required />
+        </div>
+        <div class="form-group">
+          <label for="ghRepo">Repository Name</label>
+          <input type="text" id="ghRepo" placeholder="e.g. pokemon_cards" required />
+        </div>
+        <div class="form-group">
+          <label for="ghBranch">Branch</label>
+          <input type="text" id="ghBranch" placeholder="main" value="main" required />
+        </div>
+        <div class="form-group">
+          <label for="ghToken">Fine-Grained Personal Access Token</label>
+          <input type="password" id="ghToken" placeholder="github_pat_..." />
+          <small class="help-text">
+            Needs <strong>Contents: Read and write</strong> permission on this repository. Leave blank for read-only mode.
+          </small>
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="clearSyncBtn" class="btn-secondary">Clear Credentials</button>
+          <button type="submit" class="btn-primary">Save &amp; Sync</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
+
