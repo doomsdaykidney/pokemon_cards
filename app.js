@@ -20,6 +20,7 @@ let pendingCardUpdates = new Map(); // dexId -> cardObj | null
 const tcgCardsCache = new Map(); // dexId -> Array<{ id, name, localId, image }>
 let activeModalDexId = null;
 let activePickerCards = [];
+let isEditMode = false;
 let isSyncing = false;
 let syncTimeout = null;
 let lastSyncError = "";
@@ -36,6 +37,8 @@ const collectedPercentEl = document.getElementById("collectedPercent");
 const searchInput = document.getElementById("searchInput");
 const searchResults = document.getElementById("searchResults");
 const genSelect = document.getElementById("genSelect");
+const editModeBtn = document.getElementById("editModeBtn");
+const editModeText = document.getElementById("editModeText");
 const refreshBtn = document.getElementById("refreshBtn");
 const syncSettingsBtn = document.getElementById("syncSettingsBtn");
 const syncDot = document.getElementById("syncDot");
@@ -148,9 +151,29 @@ function saveGitHubConfig(config) {
   localStorage.setItem(STORAGE_KEYS.GH_CONFIG, JSON.stringify(sanitizeConfig(config)));
 }
 
-function canEdit() {
+function isLoggedIn() {
   const config = getDefaultGitHubConfig();
   return Boolean(config.owner && config.repo && config.token);
+}
+
+function canEdit() {
+  return isLoggedIn() && isEditMode;
+}
+
+function updateEditModeUI() {
+  if (!isLoggedIn()) {
+    isEditMode = false;
+    editModeBtn.classList.add("hidden");
+    editModeBtn.classList.remove("active");
+    editModeBtn.setAttribute("aria-pressed", "false");
+    editModeText.textContent = "Edit: Off";
+    return;
+  }
+
+  editModeBtn.classList.remove("hidden");
+  editModeBtn.classList.toggle("active", isEditMode);
+  editModeBtn.setAttribute("aria-pressed", String(isEditMode));
+  editModeText.textContent = isEditMode ? "✎ Edit: On" : "Edit: Off";
 }
 
 function updateSyncIndicator(state, label, errorDetail = "") {
@@ -232,6 +255,7 @@ function updateProgressUI() {
 function renderBinderPage(highlightDexId = null) {
   const startId = (currentPage - 1) * CARDS_PER_PAGE + 1;
   const endId = Math.min(currentPage * CARDS_PER_PAGE, TOTAL_POKEMON);
+  updateEditModeUI();
   const editable = canEdit();
 
   pageSelect.value = String(currentPage);
@@ -634,10 +658,10 @@ function hasPendingChanges() {
 // Fetch latest collection.json from GitHub API (or fallback to ./collection.json)
 async function fetchRemoteCollection() {
   const config = getDefaultGitHubConfig();
-  const editable = canEdit();
+  const loggedIn = isLoggedIn();
   let hadAuthError = false;
 
-  if (!editable) {
+  if (!loggedIn) {
     pendingAdditions.clear();
     pendingRemovals.clear();
     pendingCardUpdates.clear();
@@ -658,20 +682,20 @@ async function fetchRemoteCollection() {
         const fileData = await res.json();
         const parsed = decodeBase64Json(fileData.content);
         if (Array.isArray(parsed.collected)) {
-          applyRemoteCollectionData(parsed, editable);
+          applyRemoteCollectionData(parsed, loggedIn);
           renderBinderPage();
           updateSyncIndicator(
-            editable ? "synced" : "idle",
-            editable ? "Synced" : "Log in to make edits"
+            loggedIn ? "synced" : "idle",
+            loggedIn ? "Synced" : "Log in to make edits"
           );
           return;
         }
-      } else if (res.status === 404 && editable) {
+      } else if (res.status === 404 && loggedIn) {
         // collection.json might not exist in repo yet; first save will create it
         renderBinderPage();
         updateSyncIndicator("synced", "Ready to Save");
         return;
-      } else if (editable) {
+      } else if (loggedIn) {
         let errMsg = "";
         try {
           const errJson = await res.json();
@@ -687,7 +711,7 @@ async function fetchRemoteCollection() {
       }
     } catch (err) {
       console.warn("GitHub API fetch failed, trying static file fallback:", err);
-      if (editable) {
+      if (loggedIn) {
         hadAuthError = true;
         updateSyncIndicator("error", "Network Error", String(err.message || err));
       }
@@ -700,7 +724,7 @@ async function fetchRemoteCollection() {
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data.collected)) {
-        applyRemoteCollectionData(data, editable && !hadAuthError);
+        applyRemoteCollectionData(data, loggedIn && !hadAuthError);
         renderBinderPage();
       }
     }
@@ -710,15 +734,15 @@ async function fetchRemoteCollection() {
 
   if (!hadAuthError) {
     updateSyncIndicator(
-      editable ? "synced" : "idle",
-      editable ? "Synced" : "Log in to make edits"
+      loggedIn ? "synced" : "idle",
+      loggedIn ? "Synced" : "Log in to make edits"
     );
   }
 }
 
 // Schedule debounced save + auto-merge to GitHub API
 function scheduleGitHubSave() {
-  if (!canEdit()) {
+  if (!isLoggedIn()) {
     updateSyncIndicator("idle", "Log in to make edits");
     return;
   }
@@ -734,7 +758,7 @@ function scheduleGitHubSave() {
 // Auto-merge local toggles onto latest remote collection.json and commit
 async function pushChangesToGitHub() {
   const config = getDefaultGitHubConfig();
-  if (!canEdit()) {
+  if (!isLoggedIn()) {
     updateSyncIndicator("idle", "Log in to make edits");
     return;
   }
@@ -1028,6 +1052,16 @@ document.addEventListener("click", (e) => {
   if (!e.target.closest(".search-wrapper")) {
     searchResults.classList.add("hidden");
   }
+});
+
+// Edit Mode Toggle Button
+editModeBtn.addEventListener("click", () => {
+  if (!isLoggedIn()) return;
+  isEditMode = !isEditMode;
+  if (!isEditMode) {
+    closeCardModal();
+  }
+  renderBinderPage();
 });
 
 // Refresh Button

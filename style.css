@@ -173,6 +173,28 @@ body {
   gap: 0.35rem;
 }
 
+.edit-mode-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.34rem 0.58rem;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.edit-mode-btn.active {
+  background: rgba(234, 179, 8, 0.16);
+  border-color: var(--collected-border);
+  color: #fde047;
+}
+
 .icon-btn {
   background: var(--surface);
   border: 1px solid var(--border-subtle);
