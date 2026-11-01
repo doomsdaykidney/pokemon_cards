@@ -13,8 +13,13 @@ const STORAGE_KEYS = {
 let currentPage = 1;
 let pokemonNames = {}; // { 1: "bulbasaur", ... }
 let collectedSet = new Set();
+let selectedCards = {}; // { 25: { id, name, localId, image } }
 let pendingAdditions = new Set();
 let pendingRemovals = new Set();
+let pendingCardUpdates = new Map(); // dexId -> cardObj | null
+const tcgCardsCache = new Map(); // dexId -> Array<{ id, name, localId, image }>
+let activeModalDexId = null;
+let activePickerCards = [];
 let isSyncing = false;
 let syncTimeout = null;
 let lastSyncError = "";
@@ -45,6 +50,25 @@ const ghOwnerInput = document.getElementById("ghOwner");
 const ghRepoInput = document.getElementById("ghRepo");
 const ghBranchInput = document.getElementById("ghBranch");
 const ghTokenInput = document.getElementById("ghToken");
+
+// Card Selection Modal Elements
+const cardModal = document.getElementById("cardModal");
+const cardModalDialog = document.getElementById("cardModalDialog");
+const cardModalTitle = document.getElementById("cardModalTitle");
+const cardModalBadge = document.getElementById("cardModalBadge");
+const closeCardModalBtn = document.getElementById("closeCardModalBtn");
+const cardActionView = document.getElementById("cardActionView");
+const cardCurrentPreview = document.getElementById("cardCurrentPreview");
+const openPickerBtn = document.getElementById("openPickerBtn");
+const markOwnedBtn = document.getElementById("markOwnedBtn");
+const removeShownCardBtn = document.getElementById("removeShownCardBtn");
+const removeFromCollectionBtn = document.getElementById("removeFromCollectionBtn");
+const cardPickerView = document.getElementById("cardPickerView");
+const pickerBackBtn = document.getElementById("pickerBackBtn");
+const cardFilterInput = document.getElementById("cardFilterInput");
+const pickerCountLabel = document.getElementById("pickerCountLabel");
+const pickerStatus = document.getElementById("pickerStatus");
+const cardPickerGrid = document.getElementById("cardPickerGrid");
 
 // Format #0001
 function formatDexNumber(num) {
@@ -230,8 +254,10 @@ function renderBinderPage(highlightDexId = null) {
     }
 
     const isCollected = collectedSet.has(dexId);
+    const chosenCard = isCollected ? selectedCards[dexId] : null;
+    const hasCustomCard = Boolean(chosenCard && chosenCard.image);
     const card = document.createElement("div");
-    card.className = `pokemon-card ${isCollected ? "collected" : "missing"}${editable ? " editable" : ""}`;
+    card.className = `pokemon-card ${isCollected ? "collected" : "missing"}${hasCustomCard ? " has-tcg-card" : ""}${editable ? " editable" : ""}`;
     if (highlightDexId === dexId) {
       card.classList.add("highlight-jump");
     }
@@ -241,36 +267,48 @@ function renderBinderPage(highlightDexId = null) {
       `${getPokemonName(dexId)} ${formatDexNumber(dexId)} - ${isCollected ? "Collected" : "Missing"}`
     );
 
-    card.innerHTML = `
-      <div class="card-header">
-        <span class="card-name">${getPokemonName(dexId)}</span>
-        <span class="card-dex">${formatDexNumber(dexId)}</span>
-      </div>
-      <div class="card-art-window">
+    if (hasCustomCard) {
+      card.innerHTML = `
         <img
-          class="card-sprite"
-          src="${getSpriteUrl(dexId)}"
-          alt="${getPokemonName(dexId)}"
+          class="tcg-card-artwork"
+          src="${chosenCard.image}"
+          alt="${chosenCard.name || getPokemonName(dexId)}"
           loading="lazy"
         />
-      </div>
-      <div class="card-footer">
-        <div class="card-template-lines">
-          <div class="template-line"></div>
-          <div class="template-line short"></div>
+        <span class="tcg-dex-pill">${formatDexNumber(dexId)}<span class="pill-check">✓</span></span>
+      `;
+    } else {
+      card.innerHTML = `
+        <div class="card-header">
+          <span class="card-name">${getPokemonName(dexId)}</span>
+          <span class="card-dex">${formatDexNumber(dexId)}</span>
         </div>
-        <span class="status-badge">${isCollected ? "✓" : ""}</span>
-      </div>
-    `;
+        <div class="card-art-window">
+          <img
+            class="card-sprite"
+            src="${getSpriteUrl(dexId)}"
+            alt="${getPokemonName(dexId)}"
+            loading="lazy"
+          />
+        </div>
+        <div class="card-footer">
+          <div class="card-template-lines">
+            <div class="template-line"></div>
+            <div class="template-line short"></div>
+          </div>
+          <span class="status-badge">${isCollected ? "✓" : ""}</span>
+        </div>
+      `;
+    }
 
     if (editable) {
       card.setAttribute("role", "button");
       card.setAttribute("tabindex", "0");
-      card.addEventListener("click", () => toggleCard(dexId, card));
+      card.addEventListener("click", () => openCardModal(dexId));
       card.addEventListener("keydown", (e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          toggleCard(dexId, card);
+          openCardModal(dexId);
         }
       });
     }
@@ -282,33 +320,252 @@ function renderBinderPage(highlightDexId = null) {
   updateProgressUI();
 }
 
-// Toggle a card's collected state and schedule sync
-function toggleCard(dexId, cardEl) {
+// Open the Card Action / Picker modal when a logged-in user clicks a Pokémon slot
+function openCardModal(dexId) {
   if (!canEdit()) return;
+  activeModalDexId = dexId;
 
-  const nowCollected = !collectedSet.has(dexId);
+  const isCollected = collectedSet.has(dexId);
+  const chosenCard = isCollected ? selectedCards[dexId] : null;
+  const pokemonName = getPokemonName(dexId);
 
-  if (nowCollected) {
-    collectedSet.add(dexId);
-    pendingAdditions.add(dexId);
-    pendingRemovals.delete(dexId);
+  cardModalTitle.textContent = `${formatDexNumber(dexId)} ${pokemonName}`;
+  cardModalBadge.textContent = isCollected ? "Collected" : "Missing";
+  cardModalBadge.className = `search-item-status ${isCollected ? "owned" : "missing"}`;
+
+  // Show Action View first
+  cardModalDialog.classList.remove("picker-active");
+  cardActionView.classList.remove("hidden");
+  cardPickerView.classList.add("hidden");
+
+  // Render preview of current card or Pokémon sprite
+  cardCurrentPreview.innerHTML = "";
+  const previewImg = document.createElement("img");
+  const previewCaption = document.createElement("div");
+  previewCaption.className = "preview-caption";
+
+  if (chosenCard && chosenCard.image) {
+    previewImg.className = "preview-tcg-img";
+    previewImg.src = chosenCard.image;
+    previewImg.alt = chosenCard.name || pokemonName;
+    previewCaption.textContent = `Shown card: ${chosenCard.name || pokemonName}${chosenCard.localId ? ` (#${chosenCard.localId})` : ""}`;
   } else {
-    collectedSet.delete(dexId);
-    pendingRemovals.add(dexId);
-    pendingAdditions.delete(dexId);
+    previewImg.className = "preview-sprite-img";
+    previewImg.src = getSpriteUrl(dexId);
+    previewImg.alt = pokemonName;
+    previewCaption.textContent = isCollected
+      ? "Marked as owned (default sprite shown)"
+      : "Not currently in your collection";
   }
 
-  // Update card DOM immediately
-  cardEl.className = `pokemon-card ${nowCollected ? "collected" : "missing"} editable`;
-  const badge = cardEl.querySelector(".status-badge");
-  if (badge) badge.textContent = nowCollected ? "✓" : "";
-  cardEl.setAttribute(
-    "aria-label",
-    `${getPokemonName(dexId)} ${formatDexNumber(dexId)} - ${nowCollected ? "Collected" : "Missing"}`
-  );
+  cardCurrentPreview.appendChild(previewImg);
+  cardCurrentPreview.appendChild(previewCaption);
 
-  updateProgressUI();
+  // Configure action buttons
+  openPickerBtn.textContent = chosenCard
+    ? "Change Shown Pokémon Card..."
+    : "Select a Pokémon Card...";
+
+  if (!isCollected) {
+    markOwnedBtn.classList.remove("hidden");
+    removeShownCardBtn.classList.add("hidden");
+    removeFromCollectionBtn.classList.add("hidden");
+  } else {
+    markOwnedBtn.classList.add("hidden");
+    if (chosenCard) {
+      removeShownCardBtn.classList.remove("hidden");
+    } else {
+      removeShownCardBtn.classList.add("hidden");
+    }
+    removeFromCollectionBtn.classList.remove("hidden");
+  }
+
+  cardModal.classList.remove("hidden");
+}
+
+function closeCardModal() {
+  cardModal.classList.add("hidden");
+  cardModalDialog.classList.remove("picker-active");
+  activeModalDexId = null;
+}
+
+function markPokemonOwnedOnly(dexId) {
+  if (!canEdit() || !dexId) return;
+  collectedSet.add(dexId);
+  pendingAdditions.add(dexId);
+  pendingRemovals.delete(dexId);
+  closeCardModal();
+  renderBinderPage();
   scheduleGitHubSave();
+}
+
+function selectSpecificCardForPokemon(dexId, cardObj) {
+  if (!canEdit() || !dexId || !cardObj) return;
+  collectedSet.add(dexId);
+  pendingAdditions.add(dexId);
+  pendingRemovals.delete(dexId);
+  selectedCards[dexId] = cardObj;
+  pendingCardUpdates.set(dexId, cardObj);
+  closeCardModal();
+  renderBinderPage();
+  scheduleGitHubSave();
+}
+
+function removeShownCardOnly(dexId) {
+  if (!canEdit() || !dexId) return;
+  collectedSet.add(dexId);
+  pendingAdditions.add(dexId);
+  pendingRemovals.delete(dexId);
+  delete selectedCards[dexId];
+  pendingCardUpdates.set(dexId, null);
+  closeCardModal();
+  renderBinderPage();
+  scheduleGitHubSave();
+}
+
+function removePokemonFromCollection(dexId) {
+  if (!canEdit() || !dexId) return;
+  collectedSet.delete(dexId);
+  pendingRemovals.add(dexId);
+  pendingAdditions.delete(dexId);
+  delete selectedCards[dexId];
+  pendingCardUpdates.set(dexId, null);
+  closeCardModal();
+  renderBinderPage();
+  scheduleGitHubSave();
+}
+
+// Fetch official English (UK) Pokémon TCG cards for a National Pokédex number via TCGdex v2
+async function fetchEnglishCardsForPokemon(dexId) {
+  if (tcgCardsCache.has(dexId)) {
+    return tcgCardsCache.get(dexId);
+  }
+
+  let rawList = [];
+  const byDexUrl = `https://api.tcgdex.net/v2/en/cards?dexId=eq:${encodeURIComponent(dexId)}`;
+  const res = await fetch(byDexUrl);
+  if (res.ok) {
+    const data = await res.json();
+    if (Array.isArray(data)) {
+      rawList = data;
+    }
+  }
+
+  // Fallback by species name if dexId lookup returned no entries
+  if (rawList.length === 0 && pokemonNames[dexId]) {
+    const byNameUrl = `https://api.tcgdex.net/v2/en/cards?name=${encodeURIComponent(pokemonNames[dexId])}`;
+    const nameRes = await fetch(byNameUrl);
+    if (nameRes.ok) {
+      const nameData = await nameRes.json();
+      if (Array.isArray(nameData)) {
+        rawList = nameData;
+      }
+    }
+  }
+
+  const cards = rawList
+    .filter((item) => item && typeof item.image === "string" && item.image.trim() !== "")
+    .map((item) => ({
+      id: String(item.id || ""),
+      name: String(item.name || getPokemonName(dexId)),
+      localId: String(item.localId || ""),
+      image: `${item.image.replace(/\/+$/, "")}/low.webp`,
+    }));
+
+  tcgCardsCache.set(dexId, cards);
+  return cards;
+}
+
+async function openCardPickerView(dexId) {
+  cardActionView.classList.add("hidden");
+  cardPickerView.classList.remove("hidden");
+  cardModalDialog.classList.add("picker-active");
+
+  cardFilterInput.value = "";
+  cardPickerGrid.innerHTML = "";
+  pickerCountLabel.textContent = "";
+  pickerStatus.textContent = `Loading English (UK) cards for ${getPokemonName(dexId)}...`;
+  pickerStatus.classList.remove("hidden");
+
+  try {
+    const cards = await fetchEnglishCardsForPokemon(dexId);
+    if (activeModalDexId !== dexId) return;
+    activePickerCards = cards;
+    renderCardPickerGrid();
+  } catch (err) {
+    console.error("Failed to fetch TCG cards:", err);
+    if (activeModalDexId !== dexId) return;
+    pickerStatus.textContent = "Could not load cards right now. Please check your connection and try again.";
+    pickerStatus.classList.remove("hidden");
+  }
+}
+
+function renderCardPickerGrid() {
+  const query = cardFilterInput.value.trim().toLowerCase();
+  const currentSelected = activeModalDexId ? selectedCards[activeModalDexId] : null;
+
+  const filtered = activePickerCards.filter((c) => {
+    if (!query) return true;
+    return (
+      c.name.toLowerCase().includes(query) ||
+      c.localId.toLowerCase().includes(query) ||
+      `#${c.localId.toLowerCase()}`.includes(query) ||
+      c.id.toLowerCase().includes(query)
+    );
+  });
+
+  pickerCountLabel.textContent = `${filtered.length} card${filtered.length === 1 ? "" : "s"}`;
+  cardPickerGrid.innerHTML = "";
+
+  if (filtered.length === 0) {
+    pickerStatus.textContent = activePickerCards.length === 0
+      ? "No official English cards with artwork found for this Pokémon."
+      : "No cards match your filter.";
+    pickerStatus.classList.remove("hidden");
+    return;
+  }
+
+  pickerStatus.classList.add("hidden");
+
+  filtered.forEach((cardObj) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    const isSelected = Boolean(currentSelected && currentSelected.id === cardObj.id);
+    btn.className = `picker-card-item${isSelected ? " selected-card" : ""}`;
+
+    const thumbWrap = document.createElement("div");
+    thumbWrap.className = "picker-card-thumb-wrap";
+
+    const img = document.createElement("img");
+    img.className = "picker-card-thumb";
+    img.src = cardObj.image;
+    img.alt = `${cardObj.name} #${cardObj.localId}`;
+    img.loading = "lazy";
+    thumbWrap.appendChild(img);
+
+    const meta = document.createElement("div");
+    meta.className = "picker-card-meta";
+
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "picker-card-name";
+    nameSpan.textContent = cardObj.name;
+
+    const numSpan = document.createElement("span");
+    numSpan.className = "picker-card-num";
+    numSpan.textContent = cardObj.localId ? `#${cardObj.localId}` : "";
+
+    meta.appendChild(nameSpan);
+    meta.appendChild(numSpan);
+
+    btn.appendChild(thumbWrap);
+    btn.appendChild(meta);
+
+    btn.addEventListener("click", () => {
+      selectSpecificCardForPokemon(activeModalDexId, cardObj);
+    });
+
+    cardPickerGrid.appendChild(btn);
+  });
 }
 
 // Decode Base64 UTF-8 content from GitHub API
@@ -334,6 +591,46 @@ function formatGitHubError(status, message) {
   return `GitHub Error (${status}${message ? ": " + message : ""})`;
 }
 
+// Normalize and apply remote collection.json data + optional pending edits
+function applyRemoteCollectionData(parsed, applyPending) {
+  collectedSet = new Set(Array.isArray(parsed.collected) ? parsed.collected : []);
+  selectedCards = {};
+
+  if (parsed.cards && typeof parsed.cards === "object") {
+    Object.entries(parsed.cards).forEach(([key, val]) => {
+      const id = parseInt(key, 10);
+      if (id && val && typeof val.image === "string" && val.image) {
+        selectedCards[id] = {
+          id: String(val.id || ""),
+          name: String(val.name || ""),
+          localId: String(val.localId || ""),
+          image: String(val.image),
+        };
+      }
+    });
+  }
+
+  if (applyPending) {
+    pendingAdditions.forEach((id) => collectedSet.add(id));
+    pendingRemovals.forEach((id) => collectedSet.delete(id));
+    pendingCardUpdates.forEach((cardVal, id) => {
+      if (cardVal) {
+        selectedCards[id] = cardVal;
+      } else {
+        delete selectedCards[id];
+      }
+    });
+  }
+}
+
+function hasPendingChanges() {
+  return (
+    pendingAdditions.size > 0 ||
+    pendingRemovals.size > 0 ||
+    pendingCardUpdates.size > 0
+  );
+}
+
 // Fetch latest collection.json from GitHub API (or fallback to ./collection.json)
 async function fetchRemoteCollection() {
   const config = getDefaultGitHubConfig();
@@ -343,6 +640,7 @@ async function fetchRemoteCollection() {
   if (!editable) {
     pendingAdditions.clear();
     pendingRemovals.clear();
+    pendingCardUpdates.clear();
   }
 
   if (config.owner && config.repo) {
@@ -360,11 +658,7 @@ async function fetchRemoteCollection() {
         const fileData = await res.json();
         const parsed = decodeBase64Json(fileData.content);
         if (Array.isArray(parsed.collected)) {
-          collectedSet = new Set(parsed.collected);
-          if (editable) {
-            pendingAdditions.forEach((id) => collectedSet.add(id));
-            pendingRemovals.forEach((id) => collectedSet.delete(id));
-          }
+          applyRemoteCollectionData(parsed, editable);
           renderBinderPage();
           updateSyncIndicator(
             editable ? "synced" : "idle",
@@ -386,6 +680,7 @@ async function fetchRemoteCollection() {
         if (res.status === 401 || res.status === 403) {
           pendingAdditions.clear();
           pendingRemovals.clear();
+          pendingCardUpdates.clear();
         }
         hadAuthError = true;
         updateSyncIndicator("error", formatGitHubError(res.status), errMsg);
@@ -405,11 +700,7 @@ async function fetchRemoteCollection() {
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data.collected)) {
-        collectedSet = new Set(data.collected);
-        if (editable && !hadAuthError) {
-          pendingAdditions.forEach((id) => collectedSet.add(id));
-          pendingRemovals.forEach((id) => collectedSet.delete(id));
-        }
+        applyRemoteCollectionData(data, editable && !hadAuthError);
         renderBinderPage();
       }
     }
@@ -450,7 +741,7 @@ async function pushChangesToGitHub() {
 
   if (isSyncing) return;
 
-  if (pendingAdditions.size === 0 && pendingRemovals.size === 0) {
+  if (!hasPendingChanges()) {
     updateSyncIndicator("synced", "Synced");
     return;
   }
@@ -462,6 +753,7 @@ async function pushChangesToGitHub() {
   // Snapshot the changes we are about to commit
   const addSnapshot = new Set(pendingAdditions);
   const removeSnapshot = new Set(pendingRemovals);
+  const cardSnapshot = new Map(pendingCardUpdates);
 
   const baseUrl = `https://api.github.com/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/contents/collection.json`;
   const branch = config.branch || "main";
@@ -479,16 +771,38 @@ async function pushChangesToGitHub() {
 
     let currentSha = null;
     let mergedSet = new Set(collectedSet);
+    let mergedCards = { ...selectedCards };
 
     if (getRes.ok) {
       const fileData = await getRes.json();
       currentSha = fileData.sha;
       const remoteObj = decodeBase64Json(fileData.content);
       mergedSet = new Set(Array.isArray(remoteObj.collected) ? remoteObj.collected : []);
+      mergedCards = {};
+      if (remoteObj.cards && typeof remoteObj.cards === "object") {
+        Object.entries(remoteObj.cards).forEach(([key, val]) => {
+          const id = parseInt(key, 10);
+          if (id && val && typeof val.image === "string" && val.image) {
+            mergedCards[id] = {
+              id: String(val.id || ""),
+              name: String(val.name || ""),
+              localId: String(val.localId || ""),
+              image: String(val.image),
+            };
+          }
+        });
+      }
 
-      // Apply our pending additions and removals onto the latest remote list
+      // Apply our pending additions, removals, and card selections onto the latest remote state
       addSnapshot.forEach((id) => mergedSet.add(id));
       removeSnapshot.forEach((id) => mergedSet.delete(id));
+      cardSnapshot.forEach((cardVal, id) => {
+        if (cardVal) {
+          mergedCards[id] = cardVal;
+        } else {
+          delete mergedCards[id];
+        }
+      });
     } else if (getRes.status !== 404) {
       let errMsg = "";
       try {
@@ -498,10 +812,23 @@ async function pushChangesToGitHub() {
       throw { status: getRes.status, message: errMsg };
     }
 
+    // Ensure uncollected Pokémon don't retain orphaned card entries
+    Object.keys(mergedCards).forEach((key) => {
+      const id = parseInt(key, 10);
+      if (!mergedSet.has(id)) {
+        delete mergedCards[key];
+      }
+    });
+
     const sortedList = Array.from(mergedSet).sort((a, b) => a - b);
+    const payload = { collected: sortedList };
+    if (Object.keys(mergedCards).length > 0) {
+      payload.cards = mergedCards;
+    }
+
     const body = {
       message: `Update binder collection (${sortedList.length}/${TOTAL_POKEMON} collected)`,
-      content: encodeBase64Json({ collected: sortedList }),
+      content: encodeBase64Json(payload),
       branch,
     };
     if (currentSha) {
@@ -530,11 +857,14 @@ async function pushChangesToGitHub() {
     // Clear committed items from pending sets
     addSnapshot.forEach((id) => pendingAdditions.delete(id));
     removeSnapshot.forEach((id) => pendingRemovals.delete(id));
+    cardSnapshot.forEach((val, id) => {
+      if (pendingCardUpdates.get(id) === val) {
+        pendingCardUpdates.delete(id);
+      }
+    });
 
     // Update local state with any cards the other person added in the meantime
-    collectedSet = mergedSet;
-    pendingAdditions.forEach((id) => collectedSet.add(id));
-    pendingRemovals.forEach((id) => collectedSet.delete(id));
+    applyRemoteCollectionData({ collected: sortedList, cards: mergedCards }, true);
     renderBinderPage();
 
     updateSyncIndicator("synced", "Synced");
@@ -544,6 +874,7 @@ async function pushChangesToGitHub() {
     if (err && (err.status === 401 || err.status === 403)) {
       pendingAdditions.clear();
       pendingRemovals.clear();
+      pendingCardUpdates.clear();
       await fetchRemoteCollection();
     }
     const statusLabel = err && err.status
@@ -553,7 +884,7 @@ async function pushChangesToGitHub() {
   } finally {
     isSyncing = false;
     // Only auto-schedule another pass if the previous pass succeeded AND new clicks arrived
-    if (!hadError && (pendingAdditions.size > 0 || pendingRemovals.size > 0)) {
+    if (!hadError && hasPendingChanges()) {
       scheduleGitHubSave();
     }
   }
@@ -596,9 +927,15 @@ genSelect.addEventListener("change", (e) => {
 
 // Keyboard Left/Right navigation
 window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !cardModal.classList.contains("hidden")) {
+    closeCardModal();
+    return;
+  }
   if (
     document.activeElement === searchInput ||
-    !syncModal.classList.contains("hidden")
+    document.activeElement === cardFilterInput ||
+    !syncModal.classList.contains("hidden") ||
+    !cardModal.classList.contains("hidden")
   ) {
     return;
   }
@@ -697,9 +1034,54 @@ document.addEventListener("click", (e) => {
 refreshBtn.addEventListener("click", async () => {
   updateSyncIndicator("saving", "Refreshing...");
   await fetchRemoteCollection();
-  if (pendingAdditions.size > 0 || pendingRemovals.size > 0) {
+  if (hasPendingChanges()) {
     pushChangesToGitHub();
   }
+});
+
+// Card Action & Picker Modal Listeners
+closeCardModalBtn.addEventListener("click", () => {
+  closeCardModal();
+});
+
+cardModal.addEventListener("click", (e) => {
+  if (e.target === cardModal) {
+    closeCardModal();
+  }
+});
+
+openPickerBtn.addEventListener("click", () => {
+  if (activeModalDexId) {
+    openCardPickerView(activeModalDexId);
+  }
+});
+
+markOwnedBtn.addEventListener("click", () => {
+  if (activeModalDexId) {
+    markPokemonOwnedOnly(activeModalDexId);
+  }
+});
+
+removeShownCardBtn.addEventListener("click", () => {
+  if (activeModalDexId) {
+    removeShownCardOnly(activeModalDexId);
+  }
+});
+
+removeFromCollectionBtn.addEventListener("click", () => {
+  if (activeModalDexId) {
+    removePokemonFromCollection(activeModalDexId);
+  }
+});
+
+pickerBackBtn.addEventListener("click", () => {
+  if (activeModalDexId) {
+    openCardModal(activeModalDexId);
+  }
+});
+
+cardFilterInput.addEventListener("input", () => {
+  renderCardPickerGrid();
 });
 
 // Sync Settings Modal
@@ -727,8 +1109,10 @@ clearSyncBtn.addEventListener("click", async () => {
   localStorage.removeItem(STORAGE_KEYS.COLLECTED);
   pendingAdditions.clear();
   pendingRemovals.clear();
+  pendingCardUpdates.clear();
   ghTokenInput.value = "";
   syncModal.classList.add("hidden");
+  closeCardModal();
   renderBinderPage();
   updateSyncIndicator("idle", "Log in to make edits");
   await fetchRemoteCollection();
@@ -746,7 +1130,7 @@ syncForm.addEventListener("submit", async (e) => {
   syncModal.classList.add("hidden");
   updateSyncIndicator("saving", "Syncing...");
   await fetchRemoteCollection();
-  if (pendingAdditions.size > 0 || pendingRemovals.size > 0) {
+  if (hasPendingChanges()) {
     pushChangesToGitHub();
   }
 });

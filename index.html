@@ -115,6 +115,55 @@
     </div>
   </div>
 
+  <!-- Pokémon Card Selection & Action Modal -->
+  <div id="cardModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="cardModalTitle">
+    <div class="modal-card card-modal-card" id="cardModalDialog">
+      <div class="modal-header">
+        <div class="card-modal-title-group">
+          <h2 id="cardModalTitle">#0001 Bulbasaur</h2>
+          <span id="cardModalBadge" class="search-item-status missing">Missing</span>
+        </div>
+        <button id="closeCardModalBtn" class="close-btn" aria-label="Close">&times;</button>
+      </div>
+
+      <!-- Step 1: Action Choices -->
+      <div id="cardActionView" class="card-action-view">
+        <div id="cardCurrentPreview" class="card-current-preview"></div>
+        <div class="card-action-buttons">
+          <button type="button" id="openPickerBtn" class="btn-primary btn-block">
+            Select a Pokémon Card...
+          </button>
+          <button type="button" id="markOwnedBtn" class="btn-secondary btn-block">
+            Just Mark as Owned
+          </button>
+          <button type="button" id="removeShownCardBtn" class="btn-secondary btn-block hidden">
+            Remove Shown Card (Keep as Owned)
+          </button>
+          <button type="button" id="removeFromCollectionBtn" class="btn-danger btn-block hidden">
+            Remove from Collection
+          </button>
+        </div>
+      </div>
+
+      <!-- Step 2: UK/English TCG Card Picker Grid -->
+      <div id="cardPickerView" class="card-picker-view hidden">
+        <div class="picker-toolbar">
+          <button type="button" id="pickerBackBtn" class="nav-btn">← Back</button>
+          <input
+            type="search"
+            id="cardFilterInput"
+            class="picker-filter-input"
+            placeholder="Filter cards (e.g. ex, Promo, #58)..."
+            autocomplete="off"
+          />
+          <span id="pickerCountLabel" class="picker-count"></span>
+        </div>
+        <div id="pickerStatus" class="picker-status hidden"></div>
+        <div id="cardPickerGrid" class="card-picker-grid"></div>
+      </div>
+    </div>
+  </div>
+
   <script src="app.js"></script>
 </body>
 </html>
