@@ -267,5 +267,13 @@
     983,
     999,
     1012
-  ]
+  ],
+  "cards": {
+    "68": {
+      "id": "base1-8",
+      "name": "Machamp",
+      "localId": "8",
+      "image": "https://assets.tcgdex.net/en/base/base1/8/low.webp"
+    }
+  }
 }
