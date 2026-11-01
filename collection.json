@@ -269,6 +269,12 @@
     1012
   ],
   "cards": {
+    "1": {
+      "id": "base1-44",
+      "name": "Bulbasaur",
+      "localId": "44",
+      "image": "https://assets.tcgdex.net/en/base/base1/44/low.webp"
+    },
     "68": {
       "id": "base1-8",
       "name": "Machamp",
