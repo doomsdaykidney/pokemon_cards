@@ -275,18 +275,22 @@ body {
   justify-content: space-between;
   padding: 6%;
   position: relative;
-  cursor: pointer;
+  cursor: default;
   transition: transform 0.12s ease, border-color 0.12s ease, background 0.12s ease;
   overflow: hidden;
 }
 
+.pokemon-card.editable {
+  cursor: pointer;
+}
+
 @media (hover: hover) {
-  .pokemon-card:hover {
+  .pokemon-card.editable:hover {
     transform: translateY(-2px);
   }
 }
 
-.pokemon-card:active {
+.pokemon-card.editable:active {
   transform: scale(0.96);
 }
 

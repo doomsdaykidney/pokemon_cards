@@ -124,6 +124,11 @@ function saveGitHubConfig(config) {
   localStorage.setItem(STORAGE_KEYS.GH_CONFIG, JSON.stringify(sanitizeConfig(config)));
 }
 
+function canEdit() {
+  const config = getDefaultGitHubConfig();
+  return Boolean(config.owner && config.repo && config.token);
+}
+
 function updateSyncIndicator(state, label, errorDetail = "") {
   syncDot.className = "sync-dot";
   if (state === "synced") syncDot.classList.add("synced");
@@ -134,22 +139,15 @@ function updateSyncIndicator(state, label, errorDetail = "") {
   syncSettingsBtn.title = errorDetail || label;
 }
 
-// Load local cache first for instant rendering
+// Load local UI preferences and clear any legacy cached collection edits
 function loadLocalState() {
   const savedPage = parseInt(localStorage.getItem(STORAGE_KEYS.LAST_PAGE), 10);
   if (savedPage >= 1 && savedPage <= TOTAL_PAGES) {
     currentPage = savedPage;
   }
 
-  const savedCollected = localStorage.getItem(STORAGE_KEYS.COLLECTED);
-  if (savedCollected) {
-    try {
-      const arr = JSON.parse(savedCollected);
-      collectedSet = new Set(arr);
-    } catch (e) {
-      collectedSet = new Set();
-    }
-  }
+  // Remove any previously cached browser-only collection state
+  localStorage.removeItem(STORAGE_KEYS.COLLECTED);
 
   const cachedNames = localStorage.getItem(STORAGE_KEYS.NAMES_CACHE);
   if (cachedNames) {
@@ -159,11 +157,6 @@ function loadLocalState() {
       pokemonNames = {};
     }
   }
-}
-
-function saveLocalCollected() {
-  const sorted = Array.from(collectedSet).sort((a, b) => a - b);
-  localStorage.setItem(STORAGE_KEYS.COLLECTED, JSON.stringify(sorted));
 }
 
 // Fetch all 1025 Pokémon names from PokéAPI once and cache in localStorage
@@ -215,6 +208,7 @@ function updateProgressUI() {
 function renderBinderPage(highlightDexId = null) {
   const startId = (currentPage - 1) * CARDS_PER_PAGE + 1;
   const endId = Math.min(currentPage * CARDS_PER_PAGE, TOTAL_POKEMON);
+  const editable = canEdit();
 
   pageSelect.value = String(currentPage);
   pageRangeLabel.textContent = `${formatDexNumber(startId)} – ${formatDexNumber(endId)}`;
@@ -237,13 +231,11 @@ function renderBinderPage(highlightDexId = null) {
 
     const isCollected = collectedSet.has(dexId);
     const card = document.createElement("div");
-    card.className = `pokemon-card ${isCollected ? "collected" : "missing"}`;
+    card.className = `pokemon-card ${isCollected ? "collected" : "missing"}${editable ? " editable" : ""}`;
     if (highlightDexId === dexId) {
       card.classList.add("highlight-jump");
     }
     card.dataset.dexId = String(dexId);
-    card.setAttribute("role", "button");
-    card.setAttribute("tabindex", "0");
     card.setAttribute(
       "aria-label",
       `${getPokemonName(dexId)} ${formatDexNumber(dexId)} - ${isCollected ? "Collected" : "Missing"}`
@@ -271,13 +263,17 @@ function renderBinderPage(highlightDexId = null) {
       </div>
     `;
 
-    card.addEventListener("click", () => toggleCard(dexId, card));
-    card.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        toggleCard(dexId, card);
-      }
-    });
+    if (editable) {
+      card.setAttribute("role", "button");
+      card.setAttribute("tabindex", "0");
+      card.addEventListener("click", () => toggleCard(dexId, card));
+      card.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          toggleCard(dexId, card);
+        }
+      });
+    }
 
     pocket.appendChild(card);
     binderGrid.appendChild(pocket);
@@ -288,6 +284,8 @@ function renderBinderPage(highlightDexId = null) {
 
 // Toggle a card's collected state and schedule sync
 function toggleCard(dexId, cardEl) {
+  if (!canEdit()) return;
+
   const nowCollected = !collectedSet.has(dexId);
 
   if (nowCollected) {
@@ -301,7 +299,7 @@ function toggleCard(dexId, cardEl) {
   }
 
   // Update card DOM immediately
-  cardEl.className = `pokemon-card ${nowCollected ? "collected" : "missing"}`;
+  cardEl.className = `pokemon-card ${nowCollected ? "collected" : "missing"} editable`;
   const badge = cardEl.querySelector(".status-badge");
   if (badge) badge.textContent = nowCollected ? "✓" : "";
   cardEl.setAttribute(
@@ -309,7 +307,6 @@ function toggleCard(dexId, cardEl) {
     `${getPokemonName(dexId)} ${formatDexNumber(dexId)} - ${nowCollected ? "Collected" : "Missing"}`
   );
 
-  saveLocalCollected();
   updateProgressUI();
   scheduleGitHubSave();
 }
@@ -340,6 +337,13 @@ function formatGitHubError(status, message) {
 // Fetch latest collection.json from GitHub API (or fallback to ./collection.json)
 async function fetchRemoteCollection() {
   const config = getDefaultGitHubConfig();
+  const editable = canEdit();
+  let hadAuthError = false;
+
+  if (!editable) {
+    pendingAdditions.clear();
+    pendingRemovals.clear();
+  }
 
   if (config.owner && config.repo) {
     const apiUrl = `https://api.github.com/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/contents/collection.json?ref=${encodeURIComponent(config.branch || "main")}`;
@@ -357,46 +361,55 @@ async function fetchRemoteCollection() {
         const parsed = decodeBase64Json(fileData.content);
         if (Array.isArray(parsed.collected)) {
           collectedSet = new Set(parsed.collected);
-          pendingAdditions.forEach((id) => collectedSet.add(id));
-          pendingRemovals.forEach((id) => collectedSet.delete(id));
-          saveLocalCollected();
+          if (editable) {
+            pendingAdditions.forEach((id) => collectedSet.add(id));
+            pendingRemovals.forEach((id) => collectedSet.delete(id));
+          }
           renderBinderPage();
           updateSyncIndicator(
-            config.token ? "synced" : "idle",
-            config.token ? "Synced" : "Read-Only (Add Token)"
+            editable ? "synced" : "idle",
+            editable ? "Synced" : "Log in to make edits"
           );
           return;
         }
-      } else if (res.status === 404 && config.token) {
+      } else if (res.status === 404 && editable) {
         // collection.json might not exist in repo yet; first save will create it
+        renderBinderPage();
         updateSyncIndicator("synced", "Ready to Save");
         return;
-      } else {
+      } else if (editable) {
         let errMsg = "";
         try {
           const errJson = await res.json();
           errMsg = errJson.message || "";
         } catch (_) {}
+        if (res.status === 401 || res.status === 403) {
+          pendingAdditions.clear();
+          pendingRemovals.clear();
+        }
+        hadAuthError = true;
         updateSyncIndicator("error", formatGitHubError(res.status), errMsg);
-        return;
       }
     } catch (err) {
       console.warn("GitHub API fetch failed, trying static file fallback:", err);
-      if (config.token) {
+      if (editable) {
+        hadAuthError = true;
         updateSyncIndicator("error", "Network Error", String(err.message || err));
-        return;
       }
     }
   }
 
-  // Fallback: fetch local ./collection.json if local state is empty
+  // Fallback: fetch static ./collection.json
   try {
     const res = await fetch(`./collection.json`, { cache: "no-store" });
     if (res.ok) {
       const data = await res.json();
-      if (Array.isArray(data.collected) && collectedSet.size === 0) {
+      if (Array.isArray(data.collected)) {
         collectedSet = new Set(data.collected);
-        saveLocalCollected();
+        if (editable && !hadAuthError) {
+          pendingAdditions.forEach((id) => collectedSet.add(id));
+          pendingRemovals.forEach((id) => collectedSet.delete(id));
+        }
         renderBinderPage();
       }
     }
@@ -404,17 +417,18 @@ async function fetchRemoteCollection() {
     // Running via file:// or offline
   }
 
-  updateSyncIndicator(
-    config.token ? "synced" : "idle",
-    config.token ? "Synced" : "Local Mode (Setup Sync)"
-  );
+  if (!hadAuthError) {
+    updateSyncIndicator(
+      editable ? "synced" : "idle",
+      editable ? "Synced" : "Log in to make edits"
+    );
+  }
 }
 
 // Schedule debounced save + auto-merge to GitHub API
 function scheduleGitHubSave() {
-  const config = getDefaultGitHubConfig();
-  if (!config.owner || !config.repo || !config.token) {
-    updateSyncIndicator("idle", "Saved Locally (Setup Sync)");
+  if (!canEdit()) {
+    updateSyncIndicator("idle", "Log in to make edits");
     return;
   }
 
@@ -429,8 +443,8 @@ function scheduleGitHubSave() {
 // Auto-merge local toggles onto latest remote collection.json and commit
 async function pushChangesToGitHub() {
   const config = getDefaultGitHubConfig();
-  if (!config.owner || !config.repo || !config.token) {
-    updateSyncIndicator("idle", "Saved Locally (Setup Sync)");
+  if (!canEdit()) {
+    updateSyncIndicator("idle", "Log in to make edits");
     return;
   }
 
@@ -521,13 +535,17 @@ async function pushChangesToGitHub() {
     collectedSet = mergedSet;
     pendingAdditions.forEach((id) => collectedSet.add(id));
     pendingRemovals.forEach((id) => collectedSet.delete(id));
-    saveLocalCollected();
     renderBinderPage();
 
     updateSyncIndicator("synced", "Synced");
   } catch (err) {
     hadError = true;
     console.error("Failed to sync with GitHub:", err);
+    if (err && (err.status === 401 || err.status === 403)) {
+      pendingAdditions.clear();
+      pendingRemovals.clear();
+      await fetchRemoteCollection();
+    }
     const statusLabel = err && err.status
       ? formatGitHubError(err.status)
       : "Sync Error (Tap to Check)";
@@ -704,11 +722,16 @@ syncModal.addEventListener("click", (e) => {
   }
 });
 
-clearSyncBtn.addEventListener("click", () => {
+clearSyncBtn.addEventListener("click", async () => {
   localStorage.removeItem(STORAGE_KEYS.GH_CONFIG);
+  localStorage.removeItem(STORAGE_KEYS.COLLECTED);
+  pendingAdditions.clear();
+  pendingRemovals.clear();
   ghTokenInput.value = "";
   syncModal.classList.add("hidden");
-  updateSyncIndicator("idle", "Local Mode (Setup Sync)");
+  renderBinderPage();
+  updateSyncIndicator("idle", "Log in to make edits");
+  await fetchRemoteCollection();
 });
 
 syncForm.addEventListener("submit", async (e) => {
